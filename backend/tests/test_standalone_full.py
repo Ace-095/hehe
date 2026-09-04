@@ -18,8 +18,9 @@ import json
 import unittest
 import tempfile
 
-# Add backend to path
+# Add backend to path and bootstrap vendor shims
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import _bootstrap_vendor
 
 
 # ═══════════════════════════════════════════════════════════════════════════

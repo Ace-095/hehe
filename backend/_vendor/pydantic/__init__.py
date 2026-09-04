@@ -11,17 +11,23 @@ import json
 import copy
 
 
+class _FieldInfo:
+    def __init__(self, default, ge=None, le=None):
+        self.default = default
+        self.ge = ge
+        self.le = le
+
 def Field(default=..., *, ge=None, le=None, **kwargs):
     """Minimal pydantic.Field replacement."""
     if default is ...:
-        return _dc_field(default_factory=lambda: None)
-    return _dc_field(default=default)
-
+        default = None
+    return _FieldInfo(default, ge, le)
 
 def field_validator(*field_names, mode='before'):
     """Decorator shim for pydantic v2 field_validator."""
     def decorator(func):
-        func._field_validator_names = field_names
+        underlying = func.__func__ if isinstance(func, classmethod) else func
+        underlying._field_validator_names = field_names
         return func
     return decorator
 
@@ -52,44 +58,62 @@ class BaseModel(metaclass=_ModelMeta):
 
         # Run field validators
         validators = {}
-        for attr_name in dir(type(self)):
-            attr = getattr(type(self), attr_name, None)
-            if callable(attr) and hasattr(attr, '_field_validator_names'):
-                for fn in attr._field_validator_names:
-                    validators[fn] = attr
+        for klass in type(self).__mro__:
+            for attr_name, attr in klass.__dict__.items():
+                func = attr.__func__ if isinstance(attr, classmethod) else attr
+                if hasattr(func, '_field_validator_names'):
+                    for fn in func._field_validator_names:
+                        validators[fn] = getattr(type(self), attr_name)
 
         for field_name, field_type in hints.items():
+            value = None
+            field_info = None
+            if hasattr(type(self), field_name):
+                default_attr = getattr(type(self), field_name)
+                if isinstance(default_attr, _FieldInfo):
+                    field_info = default_attr
+                    default = field_info.default
+                else:
+                    default = default_attr
+            else:
+                default = None
+
             if field_name in kwargs:
                 value = kwargs[field_name]
-                # Run validator if exists
-                if field_name in validators:
-                    value = validators[field_name](value)
-                setattr(self, field_name, value)
-            elif hasattr(type(self), field_name):
-                default = getattr(type(self), field_name)
+            elif default is not None:
                 if isinstance(default, list):
-                    setattr(self, field_name, list(default))
+                    value = list(default)
                 elif isinstance(default, dict):
-                    setattr(self, field_name, dict(default))
+                    value = dict(default)
                 else:
-                    setattr(self, field_name, default)
+                    value = default
             else:
-                # Check if Optional
                 origin = getattr(field_type, '__origin__', None)
                 if origin is type(None) or (hasattr(field_type, '__args__') and type(None) in getattr(field_type, '__args__', ())):
-                    setattr(self, field_name, None)
+                    value = None
                 else:
-                    # Try to use type default
                     if field_type in (int, float):
-                        setattr(self, field_name, field_type())
+                        value = field_type()
                     elif field_type is str:
-                        setattr(self, field_name, "")
+                        value = ""
                     elif field_type is bool:
-                        setattr(self, field_name, False)
+                        value = False
                     elif field_type is list or (hasattr(field_type, '__origin__') and getattr(field_type, '__origin__', None) is list):
-                        setattr(self, field_name, [])
+                        value = []
                     else:
-                        setattr(self, field_name, None)
+                        value = None
+            
+            # Apply validators
+            if field_info:
+                if field_info.ge is not None and value is not None and value < field_info.ge:
+                    raise ValueError(f"{field_name} must be >= {field_info.ge}")
+                if field_info.le is not None and value is not None and value > field_info.le:
+                    raise ValueError(f"{field_name} must be <= {field_info.le}")
+            
+            if field_name in validators:
+                value = validators[field_name](value)
+                
+            setattr(self, field_name, value)
 
     def model_dump(self) -> dict:
         result = {}
