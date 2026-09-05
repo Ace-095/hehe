@@ -140,6 +140,15 @@ class CameraManager:
                 except Exception as e:
                     log.error("Failed to stop camera source '%s': %s", cam_id, e)
 
+    def get_source(self, camera_id: str) -> Optional[CameraSource]:
+        """
+        Return the CameraSource instance for a given camera id (e.g.
+        'cam1', 'cam2'), or None if unknown. Used by the FSM to repoint
+        qr_pipeline_runner at whichever camera is currently active — see
+        fsm.py's _switch_camera().
+        """
+        return self._sources.get(camera_id)
+
     def status(self) -> dict:
         """
         Return pipeline status including mode, source states, and WebRTC metrics.

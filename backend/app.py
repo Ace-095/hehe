@@ -116,11 +116,11 @@ async def lifespan(app: FastAPI):
     cam_mgr = init_camera_manager()
     search_controller.set_bus(bus)
     qr_pipeline_runner.set_search_controller(search_controller)
-    cam1 = cam_mgr._sources.get("cam1")
+    cam1 = cam_mgr.get_source("cam1")
     if cam1 is not None:
         qr_pipeline_runner.set_source(cam1)
     qr_pipeline_runner.start()
-    fsm.init_fsm(bus)
+    fsm.init_fsm(bus, camera_manager=cam_mgr)
     yield
     # Shutdown
     qr_pipeline_runner.stop()

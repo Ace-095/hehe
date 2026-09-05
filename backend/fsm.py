@@ -24,8 +24,9 @@ class MissionFSM:
     and automatic failsafes.
     """
 
-    def __init__(self, bus):
+    def __init__(self, bus, camera_manager=None):
         self._bus = bus
+        self._camera_manager = camera_manager
         self._status = FSMStatus(state="INIT")
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -132,6 +133,43 @@ class MissionFSM:
 
         return False
 
+    def _switch_camera(self, mode: str, context: str) -> bool:
+        """
+        Switch the active camera and repoint qr_pipeline_runner's frame
+        source to match, resetting consensus (a streak built up against
+        one camera's view is meaningless once the view has changed).
+
+        This was previously missing entirely: qr_pipeline_runner's source
+        was set once at startup to cam1 and never changed, so the DECODE
+        state was reading Camera 1 (the wide search camera) instead of
+        Camera 2 (the motorized-focus decode camera) for the whole
+        mission — confirmed by grepping for camera_manager/set_source
+        calls outside of app.py's one-time startup wiring and finding
+        none. Fail-closed: if the switch can't be done, this transitions
+        to FAILSAFE rather than silently continuing on the wrong camera,
+        since DECODE cannot succeed that way regardless.
+        """
+        if self._camera_manager is None:
+            self._transition_to(
+                "FAILSAFE", f"No camera_manager wired into FSM, cannot switch to {mode} for {context}"
+            )
+            return False
+        try:
+            self._camera_manager.set_active(mode)
+            source = self._camera_manager.get_source(mode)
+            if source is None:
+                self._transition_to(
+                    "FAILSAFE", f"Camera source '{mode}' not found, cannot proceed with {context}"
+                )
+                return False
+            qr_pipeline_runner.set_source(source)
+            qr_pipeline_runner.consensus.reset()
+            log.info("Camera switched to '%s' for %s", mode, context)
+            return True
+        except Exception as e:
+            self._transition_to("FAILSAFE", f"Camera switch to {mode} failed: {e}")
+            return False
+
     def _send_command(self, command, *args):
         if config.FSM_DRY_RUN:
             log.info(f"[DRY-RUN] Sending MAVLink command {command} with args: {args}")
@@ -206,6 +244,8 @@ class MissionFSM:
 
                 elif curr_state == "SEARCH":
                     if elapsed < 0.2:
+                        if not self._switch_camera("cam1", "SEARCH"):
+                            continue  # _switch_camera already transitioned to FAILSAFE
                         try:
                             search_controller.start_search(
                                 dry_run=config.FSM_DRY_RUN,
@@ -223,8 +263,10 @@ class MissionFSM:
                         self._transition_to("FAILSAFE", "QR sweep timeout exceeded")
 
                 elif curr_state == "CACHE_DETECTED":
-                    # Instant transition for now, can be expanded with visual servoing
-                    self._transition_to("APPROACH", "Initiating approach")
+                    # Switch to Camera 2 (motorized-focus decode camera)
+                    # before advancing — DECODE must not read Camera 1.
+                    if self._switch_camera("cam2", "APPROACH/DECODE"):
+                        self._transition_to("APPROACH", "Initiating approach, switched to decode camera")
 
                 elif curr_state == "APPROACH":
                     # Instant transition to DECODE phase
@@ -277,10 +319,10 @@ class MissionFSM:
 
 _mission_fsm: Optional[MissionFSM] = None
 
-def init_fsm(bus) -> MissionFSM:
+def init_fsm(bus, camera_manager=None) -> MissionFSM:
     global _mission_fsm
     if _mission_fsm is None:
-        _mission_fsm = MissionFSM(bus)
+        _mission_fsm = MissionFSM(bus, camera_manager=camera_manager)
     return _mission_fsm
 
 def get_fsm() -> MissionFSM:
