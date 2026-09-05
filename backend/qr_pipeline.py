@@ -89,11 +89,15 @@ class PlaceholderColorShapeDetector(CacheDetector):
                     best_score = score
                     best_bbox = BBox(x=int(x), y=int(y), w=int(w), h=int(h), confidence=round(score, 2))
 
-        # Fallback: if no distinct contour found, return center 50% ROI
-        if best_bbox is None:
-            cx, cy = w_img // 4, h_img // 4
-            best_bbox = BBox(x=cx, y=cy, w=w_img // 2, h=h_img // 2, confidence=0.5)
-
+        # No fallback: if no contour matched the criteria, return None.
+        # A prior version fabricated a fake center-50% bbox here with
+        # confidence=0.5 whenever no real contour was found — confirmed by
+        # testing that this made detect_cache() return "something detected"
+        # even on a completely blank frame with no target in it at all,
+        # which defeats the Optional[BBox] contract every caller relies on
+        # to mean "nothing found." decode_qr() already handles bbox=None
+        # correctly via its full-frame fallback path, so there's no reason
+        # to fabricate one here.
         return best_bbox
 
 
@@ -175,14 +179,31 @@ def decode_qr(frame: np.ndarray, bbox: Optional[BBox] = None) -> Optional[str]:
 
 class ConsensusBuffer:
     """
-    Requires the same decoded string value for N consecutive frames before accepting it.
-    Prevents single-frame false decodes from triggering detection callbacks.
+    Requires the same decoded string value for N consecutive frames before
+    accepting it. Prevents single-frame false decodes from triggering
+    detection callbacks.
+
+    miss_tolerance: how many consecutive "bad" frames (no decode, or a
+    decode that disagrees with the value currently being tracked) are
+    absorbed without discarding the in-progress streak. Default 1.
+
+    This exists because the original implementation reset the streak to
+    zero on the very first bad frame — confirmed by test: feeding it
+    good, good, BLANK, good, good never reached consensus, because the
+    single blank frame in the middle wiped out the streak of 2 that had
+    already built up, and the two "good" frames after it could only get
+    it back up to streak=2 again by the end. A single motion-blurred
+    frame during an otherwise-good approach shouldn't throw away that
+    progress — that's the whole point of using a streak requirement
+    instead of a single-frame decode in the first place.
     """
 
-    def __init__(self, required_consecutive: int = 3):
+    def __init__(self, required_consecutive: int = 3, miss_tolerance: int = 1):
         self.required_consecutive = max(1, required_consecutive)
+        self.miss_tolerance = max(0, miss_tolerance)
         self._current_value: Optional[str] = None
         self._current_streak: int = 0
+        self._miss_streak: int = 0
         self._last_bbox: Optional[BBox] = None
         self._confirmed: bool = False
         self._lock = threading.Lock()
@@ -191,6 +212,7 @@ class ConsensusBuffer:
         with self._lock:
             self._current_value = None
             self._current_streak = 0
+            self._miss_streak = 0
             self._last_bbox = None
             self._confirmed = False
 
@@ -200,20 +222,44 @@ class ConsensusBuffer:
         Returns (is_newly_confirmed, QRDetectionResult).
         """
         with self._lock:
-            if decoded_value is not None and len(decoded_value) > 0:
-                if decoded_value == self._current_value:
-                    self._current_streak += 1
-                else:
-                    self._current_value = decoded_value
-                    self._current_streak = 1
-                    self._confirmed = False
+            has_value = decoded_value is not None and len(decoded_value) > 0
 
+            if has_value and decoded_value == self._current_value:
+                # Matches what we're already tracking — build the streak.
+                self._current_streak += 1
+                self._miss_streak = 0
                 if bbox is not None:
                     self._last_bbox = bbox
-            else:
-                # Corrupted / None frame: reset streak
-                self._current_streak = 0
+
+            elif has_value and self._current_value is None:
+                # First real decode we've seen at all — start tracking it.
+                self._current_value = decoded_value
+                self._current_streak = 1
+                self._miss_streak = 0
                 self._confirmed = False
+                if bbox is not None:
+                    self._last_bbox = bbox
+
+            else:
+                # Either no decode this frame, or a decode that disagrees
+                # with the value we're tracking (a possible misread).
+                # Don't touch the existing streak/value yet — only give up
+                # on it once miss_streak exceeds the configured tolerance.
+                self._miss_streak += 1
+                if self._miss_streak > self.miss_tolerance:
+                    if has_value:
+                        # Enough consecutive disagreement to treat this as
+                        # a genuine change of target, not noise — switch.
+                        self._current_value = decoded_value
+                        self._current_streak = 1
+                        if bbox is not None:
+                            self._last_bbox = bbox
+                    else:
+                        # Sustained no-signal — give up on the streak.
+                        self._current_value = None
+                        self._current_streak = 0
+                    self._miss_streak = 0
+                    self._confirmed = False
 
             newly_confirmed = False
             if self._current_streak >= self.required_consecutive and not self._confirmed:
