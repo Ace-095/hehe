@@ -251,28 +251,71 @@ class TestQRPipeline(unittest.TestCase):
         self.assertTrue(r3.confirmed)
         self.assertEqual(r3.payload, "ABC")
 
-    def test_consensus_buffer_resets_on_mismatch(self):
-        """Streak resets if a different value is decoded."""
+    def test_consensus_buffer_tolerates_single_mismatch(self):
+        """
+        A single frame decoding to a DIFFERENT value must be tolerated,
+        not treated as an immediate switch — a lone misread shouldn't
+        discard otherwise-good progress. This test used to assert the
+        opposite (immediate reset on any mismatch); that was the bug,
+        not the spec — see qr_pipeline.py's ConsensusBuffer docstring.
+        """
         from qr_pipeline import ConsensusBuffer
 
-        cb = ConsensusBuffer(required_consecutive=3)
+        cb = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
         cb.update("A")
         cb.update("A")
-        cb.update("B")  # mismatch
-        _, r = cb.update("B")
-        self.assertEqual(r.streak, 2, "Streak should restart after mismatch")
+        _, r = cb.update("B")  # single mismatch — tolerated
+        self.assertEqual(r.streak, 2, "A single mismatch should not discard A's progress")
+        self.assertFalse(r.confirmed)
+        # Back to A completes the streak on the very next good frame
+        confirmed, r2 = cb.update("A")
+        self.assertTrue(confirmed)
+        self.assertEqual(r2.payload, "A")
+
+    def test_consensus_buffer_switches_on_sustained_mismatch(self):
+        """A DIFFERENT value appearing beyond the tolerance is a genuine
+        target change, not noise, and should be adopted."""
+        from qr_pipeline import ConsensusBuffer
+
+        cb = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
+        cb.update("A")
+        cb.update("A")
+        cb.update("B")  # mismatch 1 — tolerated
+        _, r = cb.update("B")  # mismatch 2 — exceeds tolerance, switches
+        self.assertEqual(r.streak, 1, "Sustained mismatch should switch to the new value")
         self.assertFalse(r.confirmed)
 
-    def test_consensus_buffer_resets_on_none(self):
-        """None/empty value resets streak."""
+    def test_consensus_buffer_tolerates_single_none(self):
+        """
+        A single None/empty decode (motion blur, momentary miss) must be
+        absorbed without discarding an in-progress streak — this was the
+        exact bug reported and fixed last session (confirmed by directly
+        reproducing it: good, good, blank, good, good never reached
+        consensus under the old reset-on-any-miss behavior).
+        """
         from qr_pipeline import ConsensusBuffer
 
-        cb = ConsensusBuffer(required_consecutive=3)
+        cb = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
         cb.update("X")
         cb.update("X")
-        cb.update(None)  # reset
-        _, r = cb.update("X")
-        self.assertEqual(r.streak, 1)
+        _, r_miss = cb.update(None)  # tolerated, not a reset
+        self.assertEqual(r_miss.streak, 2, "A single None frame should not wipe the streak")
+        confirmed, r = cb.update("X")
+        self.assertTrue(confirmed, "Should confirm on the very next good frame")
+        self.assertEqual(r.streak, 3)
+
+    def test_consensus_buffer_resets_on_sustained_none(self):
+        """Enough CONSECUTIVE None frames in a row must still eventually
+        give up on a stale streak — the tolerance is not unlimited."""
+        from qr_pipeline import ConsensusBuffer
+
+        cb = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
+        cb.update("X")
+        cb.update("X")
+        cb.update(None)  # miss 1 — tolerated
+        _, r = cb.update(None)  # miss 2 — exceeds tolerance, resets
+        self.assertEqual(r.streak, 0)
+        self.assertFalse(r.confirmed)
 
     def test_consensus_get_status(self):
         """get_status should return current state."""

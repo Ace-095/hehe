@@ -54,9 +54,18 @@ class MissionFSM:
             return self._status.model_copy()
 
     def abort(self) -> FSMStatus:
-        """Emergency manual abort -> FAILSAFE."""
+        """
+        Emergency manual abort -> FAILSAFE.
+
+        INIT was previously in the exclusion list below, which meant
+        calling abort() on a freshly-created FSM (before start() had ever
+        been called) silently did nothing — confirmed by test failure:
+        test_fsm_abort expected FAILSAFE and got INIT. An emergency abort
+        should work regardless of whether the mission has technically
+        begun yet.
+        """
         with self._lock:
-            if self._status.state not in ["INIT", "FAILSAFE", "RTL", "LAND", "MISSION_COMPLETE"]:
+            if self._status.state not in ["FAILSAFE", "RTL", "LAND", "MISSION_COMPLETE"]:
                 self._transition_to("FAILSAFE", "Manual abort triggered")
             return self._status.model_copy()
 

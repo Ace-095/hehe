@@ -35,41 +35,88 @@ def test_consensus_buffer_streak():
 
 
 def test_consensus_buffer_corrupted_frame_edge_case():
-    buf = ConsensusBuffer(required_consecutive=3)
+    """
+    A single corrupted/no-decode frame must NOT wipe an in-progress
+    streak — this was an explicit design requirement from the original
+    plan and was previously violated by this exact test: it used to
+    assert streak==0 after one bad frame, which was testing the bug,
+    not the spec. Confirmed by direct reproduction last session: feeding
+    good, good, blank, good, good never reached consensus under the old
+    reset-on-any-miss behavior.
+    """
+    buf = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
 
     # Frame 1 & 2 valid
     buf.update("42", BBox(x=10, y=10, w=50, h=50))
     _, res2 = buf.update("42", BBox(x=10, y=10, w=50, h=50))
     assert res2.streak == 2 and not res2.confirmed
 
-    # Frame 3 corrupted (None decode) -> Must NOT confirm or false-trigger
+    # Frame 3 corrupted (None decode) -> must be ABSORBED, not wipe the streak
     newly_confirmed, res3 = buf.update(None, None)
-    assert not newly_confirmed and not res3.confirmed and res3.streak == 0
+    assert not newly_confirmed and not res3.confirmed and res3.streak == 2, (
+        f"expected streak preserved at 2 after one tolerated miss, got {res3.streak}"
+    )
 
-    # Frames 4, 5, 6 valid decodes
+    # Frame 4: back to a valid decode -> completes the streak immediately,
+    # since progress wasn't discarded
+    newly_confirmed, res4 = buf.update("42", BBox(x=10, y=10, w=50, h=50))
+    assert newly_confirmed and res4.confirmed and res4.streak == 3 and res4.payload == "42"
+
+    print("PASS: Single corrupted frame correctly absorbed without wiping the streak.")
+
+
+def test_consensus_buffer_sustained_corruption_does_eventually_reset():
+    """The miss-tolerance is not unlimited: enough CONSECUTIVE bad frames
+    in a row must still eventually give up on a stale streak."""
+    buf = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
     buf.update("42", BBox(x=10, y=10, w=50, h=50))
     buf.update("42", BBox(x=10, y=10, w=50, h=50))
-    newly_confirmed, res6 = buf.update("42", BBox(x=10, y=10, w=50, h=50))
-
-    assert newly_confirmed and res6.confirmed and res6.streak == 3 and res6.payload == "42"
-    print("PASS: Corrupted frame edge case correctly reset streak without false positive trigger.")
+    buf.update(None, None)  # miss 1 - tolerated, streak preserved at 2
+    _, res = buf.update(None, None)  # miss 2 - exceeds tolerance, now resets
+    assert res.streak == 0 and not res.confirmed, (
+        f"expected streak to reset after exceeding miss_tolerance, got {res.streak}"
+    )
+    print("PASS: Sustained (not just single-frame) corruption still resets the streak.")
 
 
 def test_consensus_buffer_mismatch_reset():
-    buf = ConsensusBuffer(required_consecutive=3)
+    """
+    A single frame decoding to a DIFFERENT value than the one being
+    tracked (a possible misread) must not immediately discard the
+    existing streak — same miss-tolerance logic applies to mismatches
+    as to None/empty decodes.
+    """
+    buf = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
 
     buf.update("TARGET_A", BBox(x=10, y=10, w=50, h=50))
-    buf.update("TARGET_A", BBox(x=10, y=10, w=50, h=50))
+    _, res2 = buf.update("TARGET_A", BBox(x=10, y=10, w=50, h=50))
+    assert res2.streak == 2 and not res2.confirmed
 
-    # Mismatched payload
+    # A single mismatched read - tolerated, doesn't discard TARGET_A's progress
     _, res_b = buf.update("TARGET_B", BBox(x=10, y=10, w=50, h=50))
-    assert res_b.streak == 1 and not res_b.confirmed
+    assert res_b.streak == 2 and not res_b.confirmed, (
+        f"expected TARGET_A's streak preserved at 2 after one tolerated mismatch, got {res_b.streak}"
+    )
 
+    # Back to TARGET_A - completes the streak
+    newly_confirmed, res3 = buf.update("TARGET_A", BBox(x=10, y=10, w=50, h=50))
+    assert newly_confirmed and res3.confirmed and res3.payload == "TARGET_A"
+    print("PASS: Single mismatched frame tolerated, correct value still confirmed.")
+
+
+def test_consensus_buffer_sustained_mismatch_does_switch():
+    """If a DIFFERENT value keeps appearing beyond the tolerance, that's
+    a genuine target change, not noise — the buffer should switch to it."""
+    buf = ConsensusBuffer(required_consecutive=3, miss_tolerance=1)
+    buf.update("TARGET_A", BBox(x=10, y=10, w=50, h=50))
+    buf.update("TARGET_A", BBox(x=10, y=10, w=50, h=50))
+    buf.update("TARGET_B", BBox(x=10, y=10, w=50, h=50))  # mismatch 1 - tolerated
+    _, res = buf.update("TARGET_B", BBox(x=10, y=10, w=50, h=50))  # mismatch 2 - switches
+    assert res.streak == 1, f"expected switch to TARGET_B with streak=1, got {res.streak}"
     buf.update("TARGET_B", BBox(x=10, y=10, w=50, h=50))
-    newly_confirmed, res_b3 = buf.update("TARGET_B", BBox(x=10, y=10, w=50, h=50))
-
-    assert newly_confirmed and res_b3.confirmed and res_b3.payload == "TARGET_B"
-    print("PASS: Mismatched payload cleanly reset streak and required 3 matching frames.")
+    newly_confirmed, res_final = buf.update("TARGET_B", BBox(x=10, y=10, w=50, h=50))
+    assert newly_confirmed and res_final.payload == "TARGET_B"
+    print("PASS: Sustained mismatch correctly treated as a genuine target change.")
 
 
 def test_synthetic_qr_source_end_to_end():
@@ -108,7 +155,9 @@ def main():
     tests = [
         ("test_consensus_buffer_streak", test_consensus_buffer_streak),
         ("test_consensus_buffer_corrupted_frame_edge_case", test_consensus_buffer_corrupted_frame_edge_case),
+        ("test_consensus_buffer_sustained_corruption_does_eventually_reset", test_consensus_buffer_sustained_corruption_does_eventually_reset),
         ("test_consensus_buffer_mismatch_reset", test_consensus_buffer_mismatch_reset),
+        ("test_consensus_buffer_sustained_mismatch_does_switch", test_consensus_buffer_sustained_mismatch_does_switch),
         ("test_synthetic_qr_source_end_to_end", test_synthetic_qr_source_end_to_end),
     ]
 

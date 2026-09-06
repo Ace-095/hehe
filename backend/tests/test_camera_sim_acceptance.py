@@ -5,6 +5,10 @@ Tests SyntheticQRSource and GazeboCameraSource pipelines, decodes QR payloads,
 and measures end-to-end frame acquisition latency.
 """
 
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 import unittest
 import cv2
