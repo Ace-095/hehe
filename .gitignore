@@ -1,0 +1,25 @@
+# Virtual environments — machine-specific, never shared between laptop
+# and Pi. The Pi's venv in particular MUST be created locally with
+# --system-site-packages (see docs/HARDWARE_SETUP.md) so it can see the
+# apt-installed picamera2/libcamera bindings. A committed venv from the
+# laptop would silently overwrite that on `git pull` and break it.
+.venv/
+venv/
+env/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local runtime state — regenerated on each machine, not shared
+backend/.fence_state.json
+
+# Editor/OS noise
+.DS_Store
+.vscode/
+.idea/
+
+# Test artifacts
+.pytest_cache/
+*.mbtiles
