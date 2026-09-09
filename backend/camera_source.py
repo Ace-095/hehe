@@ -411,56 +411,155 @@ class GazeboCameraSource(CameraSource):
 # Picamera2 source (real hardware stub — Phase 9)
 # ---------------------------------------------------------------------------
 
+def detect_cameras() -> list[dict]:
+    """
+    Enumerate physically connected cameras via Picamera2's official
+    multi-camera discovery API (Picamera2.global_camera_info() —
+    documented in the official Picamera2 manual, verified against
+    current usage, not guessed).
+
+    Returns a list of dicts: [{"index": int, "model": str}, ...]
+    ordered the same way Picamera2 itself enumerates them.
+
+    Known real quirk this works around: on single-camera boards, the
+    'Num' field is sometimes absent from global_camera_info()'s own
+    return value entirely (reported upstream:
+    github.com/raspberrypi/picamera2/issues/919) rather than reliably
+    being 0. Don't trust the 'Num' key — use the list POSITION instead,
+    which is always the correct camera_num to pass to Picamera2(camera_num=i)
+    regardless of that inconsistency.
+
+    Returns an empty list if picamera2 isn't installed (e.g. running this
+    on the dev laptop) rather than raising, so callers can fail closed
+    with a clear message instead of an ImportError leaking out here.
+    """
+    try:
+        from picamera2 import Picamera2
+    except ImportError:
+        return []
+
+    try:
+        raw_info = Picamera2.global_camera_info()
+    except Exception as exc:
+        raise RuntimeError(f"Picamera2.global_camera_info() failed: {exc}") from exc
+
+    cameras = []
+    for i, info in enumerate(raw_info):
+        cameras.append({
+            "index": i,  # list position, NOT info.get("Num") — see docstring
+            "model": info.get("Model", "unknown"),
+        })
+    return cameras
+
+
+# Known sensor model strings for role assignment. Picamera2 reports these
+# as lowercase strings (e.g. "imx708", "imx477") in global_camera_info()'s
+# 'Model' field — confirmed pattern from multiple Picamera2 bug reports/
+# forum threads showing real global_camera_info() output, but the EXACT
+# string on your specific modules is a NEED TEST item — print
+# detect_cameras() output once hardware is connected and confirm these
+# match before relying on this for role assignment.
+_SEARCH_CAM_MODEL_HINTS = ("imx708",)  # Pi Camera Module 3 Wide
+_DECODE_CAM_MODEL_HINTS = ("imx477",)  # Arducam 12MP
+
+
 class Picamera2Source(CameraSource):
     """
-    Real hardware camera source for the Raspberry Pi.
+    Real hardware camera source for the Raspberry Pi, using the official
+    Picamera2 library.
 
-    STUB — NOT IMPLEMENTED YET. Phase 9 hardware bring-up task.
+    Verified against the official Picamera2 manual and current usage
+    patterns for: multi-camera enumeration (global_camera_info),
+    construction (Picamera2(camera_num=...)), and frame capture
+    (capture_array()). NOT yet run against real hardware — this project
+    has no physical camera to test against. Treat every NEED TEST note
+    below as a real gap, not a formality.
 
-    This class is intentionally incomplete. Picamera2's full API surface
-    (configuration dicts, format strings, ISP tuning YAML path, autofocus
-    trigger semantics) must be verified against the actual camera modules
-    before this is written. Guessing it now would introduce hard-to-detect
-    bugs at competition time.
-
-    What to do in Phase 9:
-      1. `libcamera-hello --list-cameras` — confirm both cameras are visible.
-      2. Check focus motor sanity: `libcamera-still --autofocus-mode=auto -o test.jpg`
-      3. Install picamera2: `pip install picamera2`
-      4. Read: https://datasheets.raspberrypi.com/camera/picamera2-manual.pdf
-      5. Implement start(), get_frame(), stop() using Picamera2.capture_array()
-         in a background thread feeding a queue — same pattern as this file.
-      6. Set CAMERA_SOURCE=picamera2 and verify frames decode QR codes.
+    NEED TEST once hardware is connected:
+      - Exact 'Model' string reported for each of your two modules
+        (print detect_cameras() and compare against _SEARCH_CAM_MODEL_HINTS
+        / _DECODE_CAM_MODEL_HINTS above).
+      - Color channel order: configured for "RGB888" below, but Picamera2
+        has a documented history of actually returning BGR-ordered bytes
+        for that format string on some libcamera versions. Doesn't affect
+        QR decode (grayscale-based) but matters for correct-looking video
+        streamed to the browser — verify by capturing one frame and
+        checking a known-color test target.
+      - Arducam IMX477 motorized focus control (set_focus() below is not
+        implemented — needs Arducam's own driver/library once confirmed
+        which one ships with your specific module).
+      - Real achievable FPS at your target resolution — configured for
+        1920x1080 as a reasonable default, not a measured one.
 
     Parameters
     ----------
     camera_index : int
-        Camera index (0 = Camera 1 belly, 1 = Camera 2 belly — NEED TEST,
-        depends on how the cameras are enumerated after wiring).
+        Index from detect_cameras() — NOT a hardcoded 0/1 assumption.
     width, height : int
-        Desired capture resolution. NEED TEST against actual module.
+        Capture resolution.
     """
 
     def __init__(self, camera_index: int = 0, width: int = 1920, height: int = 1080):
         self._camera_index = camera_index
         self._width = width
         self._height = height
+        self._picam2 = None
+        self._started = False
+        self._lock = threading.Lock()
 
     def start(self) -> None:
-        raise NotImplementedError(
-            "Picamera2Source is not yet implemented. "
-            "See Phase 9 in the implementation plan and the docstring above."
-        )
+        with self._lock:
+            if self._started:
+                return
+            try:
+                from picamera2 import Picamera2
+            except ImportError as exc:
+                raise ImportError(
+                    "picamera2 not importable. This source must run on the Pi, "
+                    "with 'sudo apt install python3-picamera2' done first and the "
+                    "venv created with --system-site-packages — see HARDWARE_SETUP.md."
+                ) from exc
+
+            self._picam2 = Picamera2(camera_num=self._camera_index)
+            config = self._picam2.create_video_configuration(
+                main={"size": (self._width, self._height), "format": "RGB888"}
+            )
+            self._picam2.configure(config)
+            self._picam2.start()
+            self._started = True
 
     def get_frame(self) -> np.ndarray:
+        if not self._started:
+            raise RuntimeError("Picamera2Source.start() must be called before get_frame()")
+        # capture_array() is Picamera2's standard documented method for
+        # retrieving a frame as a numpy array directly (no intermediate
+        # file/buffer encode step) — see the "main" stream configured above.
+        return self._picam2.capture_array("main")
+
+    def set_focus(self, position: float) -> None:
+        """
+        Arducam IMX477 motorized focus control.
+        NOT IMPLEMENTED — genuinely blocked, not deferred out of laziness.
+        Exact interface (I2C register access vs. Arducam's own vendor
+        library) depends on which specific driver package ships with your
+        module. Confirm with Arducam's own documentation once the
+        hardware is in hand, then implement this against the real API —
+        don't guess a register address from a datasheet alone.
+        """
         raise NotImplementedError(
-            "Picamera2Source is not yet implemented. "
-            "See Phase 9 in the implementation plan and the docstring above."
+            "Arducam IMX477 focus control needs the vendor driver confirmed "
+            "against your physical module first — see docstring."
         )
 
     def stop(self) -> None:
-        # Idempotent — nothing to clean up until implemented
-        pass
+        with self._lock:
+            if not self._started:
+                return
+            if self._picam2 is not None:
+                self._picam2.stop()
+                self._picam2.close()
+                self._picam2 = None
+            self._started = False
 
 
 # ---------------------------------------------------------------------------

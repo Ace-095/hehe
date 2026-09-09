@@ -98,8 +98,86 @@ def init_camera_manager() -> CameraManager:
         cam1 = get_camera_source("gazebo", topic=config.ROS2_CAM1_TOPIC)
         cam2 = get_camera_source("gazebo", topic=config.ROS2_CAM2_TOPIC)
     else:
-        cam1 = get_camera_source("picamera2", camera_index=0)
-        cam2 = get_camera_source("picamera2", camera_index=1)
+        # Auto-detect what's physically connected rather than assuming
+        # camera_index 0/1 always map to cam1/cam2 — device enumeration
+        # order isn't guaranteed to be stable across boots/wiring.
+        from camera_source import detect_cameras, _SEARCH_CAM_MODEL_HINTS, _DECODE_CAM_MODEL_HINTS
+
+        detected = detect_cameras()
+        log.info("detect_cameras() found %d camera(s): %s", len(detected), detected)
+
+        if len(detected) == 0:
+            # Fail closed. A silent fallback here would mean the FSM's
+            # camera-switch calls (see fsm.py::_switch_camera) succeed
+            # against nothing, and the mission would run blind without
+            # any clear signal why.
+            raise RuntimeError(
+                "detect_cameras() found 0 cameras. Check physical connections "
+                "(rpicam-hello --list-cameras should show at least one) before "
+                "starting the service — refusing to start with no camera source."
+            )
+
+        elif len(detected) == 1:
+            # Single-camera mode: use the one physical camera for both
+            # roles. Whatever its FOV/focal-length actually is now
+            # determines BOTH the search altitude AND the decode
+            # altitude — there's no separate long-focal-length camera to
+            # get you the extra resolution DECODE needs. Expect to need
+            # to descend closer than a dual-camera setup would require
+            # (see the GSD math from our camera-altitude discussion).
+            only = detected[0]
+            log.warning(
+                "Only 1 camera detected (model='%s') — running in SINGLE-CAMERA "
+                "mode. Both cam1 (search) and cam2 (decode) will read the same "
+                "physical camera. Decode altitude requirements change — this is "
+                "degraded operation, not equivalent to the dual-camera design.",
+                only["model"],
+            )
+            shared = get_camera_source("picamera2", camera_index=only["index"])
+            cam1 = shared
+            cam2 = shared
+
+        else:
+            # 2+ cameras: assign roles by sensor model rather than
+            # trusting index order, which isn't guaranteed to correspond
+            # to "search cam" vs "decode cam" just because it's first.
+            def _match(info, hints):
+                return any(h in info["model"].lower() for h in hints)
+
+            search_matches = [c for c in detected if _match(c, _SEARCH_CAM_MODEL_HINTS)]
+            decode_matches = [c for c in detected if _match(c, _DECODE_CAM_MODEL_HINTS)]
+
+            if search_matches and decode_matches:
+                search_cam, decode_cam = search_matches[0], decode_matches[0]
+                log.info(
+                    "Assigned by sensor model: cam1=search (index=%d, model=%s), "
+                    "cam2=decode (index=%d, model=%s)",
+                    search_cam["index"], search_cam["model"],
+                    decode_cam["index"], decode_cam["model"],
+                )
+            else:
+                # Models didn't match known hints — fall back to index
+                # order, but this is exactly the kind of silent-guess
+                # situation that should be loud, not quiet.
+                search_cam, decode_cam = detected[0], detected[1]
+                log.warning(
+                    "Could not identify cameras by sensor model (expected hints "
+                    "%s / %s, got models %s) — falling back to index order "
+                    "(index 0 -> cam1/search, index 1 -> cam2/decode). Verify "
+                    "this is actually correct for your wiring before trusting it.",
+                    _SEARCH_CAM_MODEL_HINTS, _DECODE_CAM_MODEL_HINTS,
+                    [c["model"] for c in detected],
+                )
+
+            if len(detected) > 2:
+                log.warning(
+                    "detect_cameras() found %d cameras, more than the 2 this "
+                    "system expects — ignoring extras beyond the 2 assigned above.",
+                    len(detected),
+                )
+
+            cam1 = get_camera_source("picamera2", camera_index=search_cam["index"])
+            cam2 = get_camera_source("picamera2", camera_index=decode_cam["index"])
 
     _camera_manager = CameraManager({"cam1": cam1, "cam2": cam2})
     _camera_manager.set_active(config.DEFAULT_CAMERA_MODE)
