@@ -312,7 +312,28 @@ class QRPipelineRunner:
         self._lock = threading.Lock()
 
     def set_source(self, source) -> None:
+        """
+        Swap the active camera source.
+
+        Calls start() on the new source — CameraSource.get_frame() is
+        documented to require start() first, and this call was
+        previously missing entirely here. _run_loop's get_frame() call
+        was therefore always raising RuntimeError, silently swallowed by
+        its broad except at DEBUG level — confirmed by direct
+        reproduction: consensus streak stayed at 0 forever, never
+        reaching even a single successful decode.
+
+        Deliberately does NOT stop the previous source — CameraManager
+        independently owns start/stop lifecycle for these same source
+        objects (for WebRTC streaming), and stopping one here could pull
+        it out from under CameraManager while it's still in use.
+        start() is required to be idempotent by the CameraSource
+        contract, so calling it again here even if CameraManager already
+        started this same source is safe.
+        """
         self._source = source
+        if source is not None:
+            source.start()
 
     def set_search_controller(self, controller) -> None:
         self._search_controller = controller
