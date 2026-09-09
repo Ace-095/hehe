@@ -73,7 +73,7 @@ class SearchWaypoint(BaseModel):
 
 
 class SearchStatus(BaseModel):
-    state: Literal["idle", "searching", "holding", "target_found", "completed", "error"] = "idle"
+    state: Literal["idle", "searching", "holding", "target_found", "approaching", "decoded", "completed", "error"] = "idle"
     dry_run: bool = False
     strategy: str = "expanding_square"
     altitude_m: float = 5.0

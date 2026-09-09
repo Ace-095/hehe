@@ -22,11 +22,14 @@ from pymavlink import mavutil
 
 
 def run_mock_fc(bind_addr: str, stop_event: threading.Event,
-                origin_lat: float = 12.9716, origin_lon: float = 77.5946):
+                origin_lat: float = 12.9716, origin_lon: float = 77.5946,
+                simulated_relative_alt_m: float = 14.0):
     # bind_addr should be like "udp:0.0.0.0:14560" - use input=True to listen
     conn = mavutil.mavlink_connection(bind_addr, input=True)
     fence_items = []  # list of (x_int, y_int, command)
     last_hb = 0.0
+    last_pos = 0.0
+    boot_time = time.time()  # reference for time_boot_ms — must stay well within uint32 range
     # State for upload protocol
     upload_expected_count = 0
     upload_received = {}  # seq -> (x, y, cmd)
@@ -42,6 +45,24 @@ def run_mock_fc(bind_addr: str, stop_event: threading.Event,
                 0, 0, mavutil.mavlink.MAV_STATE_STANDBY,
             )
             last_hb = now
+
+        if now - last_pos > 0.3:
+            # A stationary fake position at origin_lat/lon, holding at
+            # simulated_relative_alt_m — enough for tests that need SOME
+            # position feed (e.g. search_algorithm's approach-descent
+            # logic, which reads GLOBAL_POSITION_INT to know where to
+            # hold/descend from). Doesn't simulate real flight dynamics —
+            # this is a fixed value, not a moving vehicle.
+            conn.mav.global_position_int_send(
+                int((now - boot_time) * 1000),  # time_boot_ms — relative, not epoch
+                int(origin_lat * 1e7),
+                int(origin_lon * 1e7),
+                int(simulated_relative_alt_m * 1000),  # alt (mm)
+                int(simulated_relative_alt_m * 1000),  # relative_alt (mm)
+                0, 0, 0,  # vx, vy, vz (cm/s)
+                65535,  # hdg unknown
+            )
+            last_pos = now
 
         msg = conn.recv_match(blocking=True, timeout=0.2)
         if msg is None:

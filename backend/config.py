@@ -91,13 +91,36 @@ class Config:
     SYNTHETIC_QR_PAYLOAD: str = os.environ.get("SYNTHETIC_QR_PAYLOAD", "42")
 
     # --- Search Algorithm (Phase 6) ---
-    # SEARCH_ALTITUDE_M is a config placeholder — NEED TEST: pick a real value
-    # from actual sim/field trials of detection confidence vs. altitude.
-    SEARCH_ALTITUDE_M: float = float(os.environ.get("SEARCH_ALTITUDE_M", "5.0"))
+    # SEARCH_ALTITUDE_M — the planned search-sweep altitude is ~14-15m per
+    # the project's actual hardware discussion (T-Motor Air 2216/920KV
+    # class, camera FOV math for Camera 1 Wide). Still fully overridable
+    # via env var, not a hardcoded assumption baked into logic anywhere.
+    SEARCH_ALTITUDE_M: float = float(os.environ.get("SEARCH_ALTITUDE_M", "14.0"))
     SEARCH_SPEED_MS: float = float(os.environ.get("SEARCH_SPEED_MS", "1.5"))
     SEARCH_STEP_M: float = float(os.environ.get("SEARCH_STEP_M", "2.0"))
     SEARCH_WAYPOINT_RADIUS_M: float = float(os.environ.get("SEARCH_WAYPOINT_RADIUS_M", "1.0"))
     SEARCH_STRATEGY: str = os.environ.get("SEARCH_STRATEGY", "expanding_square")
+
+    # --- Approach/decode descent (Phase 6/8) ---
+    # Deliberately NOT a single fixed "decode altitude" — the actual
+    # altitude decode succeeds at depends on the real lens/QR-size
+    # combination (confirmed by GSD math: a 6mm lens needs ~9m for
+    # 4px/module, a 16mm lens could manage from ~25m — too far apart to
+    # guess a single number). Instead the FSM descends step by step,
+    # checking live QR decode consensus after each step, and stops as
+    # soon as decode succeeds OR the safety floor below is reached.
+    APPROACH_DESCENT_STEP_M: float = float(os.environ.get("APPROACH_DESCENT_STEP_M", "1.5"))
+    # Hard safety floor — never descended below regardless of decode
+    # status. NEED TEAM INPUT: set based on the actual cache's physical
+    # height and your comfort margin above it, once known.
+    APPROACH_MIN_ALTITUDE_M: float = float(os.environ.get("APPROACH_MIN_ALTITUDE_M", "1.5"))
+    # How long to hold at each altitude step before descending further —
+    # must be long enough for the QR consensus buffer (default requires 3
+    # consecutive good frames) to actually reach a decision at that step.
+    APPROACH_STEP_HOLD_S: float = float(os.environ.get("APPROACH_STEP_HOLD_S", "2.5"))
+    # Overall descent timeout — a safety backstop distinct from the
+    # per-step hold time, in case something upstream never resolves.
+    APPROACH_MAX_DURATION_S: float = float(os.environ.get("APPROACH_MAX_DURATION_S", "45.0"))
 
     # --- QR / Cache Pipeline (Phase 7) ---
     QR_CONSENSUS_STREAK: int = int(os.environ.get("QR_CONSENSUS_STREAK", "3"))

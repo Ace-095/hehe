@@ -13,6 +13,7 @@ import state
 from telemetry import push_event
 from search_algorithm import search_controller
 from qr_pipeline import qr_pipeline_runner
+import mavlink_fence as mf
 
 log = logging.getLogger("fsm")
 
@@ -278,8 +279,34 @@ class MissionFSM:
                         self._transition_to("APPROACH", "Initiating approach, switched to decode camera")
 
                 elif curr_state == "APPROACH":
-                    # Instant transition to DECODE phase
-                    self._transition_to("DECODE", "In position to decode")
+                    if elapsed < 0.2:
+                        try:
+                            search_controller.begin_approach_descent()
+                        except Exception as e:
+                            self._transition_to("FAILSAFE", f"Approach descent failed to start: {e}")
+                            continue
+
+                    approach_status = search_controller.get_status()
+                    if approach_status.state == "decoded":
+                        # Decode already succeeded mid-descent — no need
+                        # for a separate DECODE phase to re-check the
+                        # same consensus buffer at the same altitude.
+                        qr_status = qr_pipeline_runner.consensus.get_status()
+                        self._transition_to(
+                            "CONFIRMED",
+                            f"Consensus reached during descent at {approach_status.altitude_m:.1f}m: {qr_status.payload}",
+                            payload=qr_status.payload,
+                        )
+                    elif approach_status.state == "error":
+                        # Reached the safety floor (or descent-level
+                        # timeout) without a confirmed decode — hand off
+                        # to DECODE for a final attempt at the current
+                        # (lowest reached) altitude, rather than giving
+                        # up immediately.
+                        self._transition_to(
+                            "DECODE", f"Descent ended without decode ({approach_status.reason}); trying at current altitude"
+                        )
+                    # else still "approaching" — keep polling, no transition yet
 
                 elif curr_state == "DECODE":
                     qr_status = qr_pipeline_runner.consensus.get_status()
@@ -293,6 +320,14 @@ class MissionFSM:
 
                 elif curr_state == "TRANSMIT_RESULT":
                     push_event("mission_result", {"payload": self._status.payload, "timestamp": time.time()})
+                    try:
+                        mf.send_statustext(self._bus, f"QR:{self._status.payload}", severity=6)
+                        log.info("Sent result to Mission Planner via STATUSTEXT: QR:%s", self._status.payload)
+                    except Exception as e:
+                        # Don't block the mission on this — the UI already
+                        # has the result via push_event above. But this
+                        # must not fail silently either.
+                        log.error("Failed to send result to Mission Planner: %s", e)
                     self._transition_to("RTL", "Result transmitted, returning to launch")
 
                 elif curr_state == "FAILSAFE":

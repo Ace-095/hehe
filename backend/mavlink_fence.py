@@ -282,6 +282,39 @@ def clear_fence(bus: MavlinkBus, timeout_s: float) -> None:
 # Parameters
 # ---------------------------------------------------------------------------
 
+def send_statustext(bus: MavlinkBus, text: str, severity: int = 6) -> None:
+    """
+    Send a STATUSTEXT message — this is what actually shows up in Mission
+    Planner's message log, distinct from telemetry.py's push_event which
+    only reaches our own browser UI over its own WebSocket. Confirmed gap:
+    this function didn't previously exist anywhere in the codebase, and
+    TRANSMIT_RESULT only ever called push_event — the decoded QR result
+    never reached Mission Planner at all.
+
+    severity: MAV_SEVERITY_* — default 6 (INFO). Fire-and-forget, no
+    ACK exists for STATUSTEXT in the MAVLink spec, so this doesn't wait
+    for confirmation the way fence operations do.
+
+    text is capped at 50 bytes per the MAVLink STATUSTEXT field width —
+    truncated (not chunked) here since our actual messages ("QR:27") are
+    always far under that limit. If a future message could exceed 50
+    bytes, this needs the chunked STATUSTEXT variant (id/chunk_seq
+    fields) instead of silent truncation.
+
+    Signature verified against pymavlink's actual statustext_send:
+    (severity, text, id=0, chunk_seq=0) — checked directly rather than
+    assumed, since getting field order wrong here would silently send
+    garbage to Mission Planner.
+    """
+    encoded = text.encode("utf-8")[:50]
+    padded = encoded.ljust(50, b"\x00")
+    bus.send(
+        bus.conn.mav.statustext_send,
+        severity,
+        padded,
+    )
+
+
 def get_param(bus: MavlinkBus, param_id: str, timeout_s: float) -> float:
     """
     Read a single parameter value from the flight controller. Used by the

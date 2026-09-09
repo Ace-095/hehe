@@ -13,6 +13,7 @@ import argparse
 import logging
 import math
 import os
+import queue
 import sys
 import time
 import threading
@@ -23,7 +24,7 @@ os.environ.setdefault("MAVLINK20", "1")
 from pymavlink import mavutil
 
 from config import config
-from geo_utils import ENU, enu_to_latlon, point_in_polygon
+from geo_utils import ENU, enu_to_latlon, latlon_to_enu, point_in_polygon
 from models import ENUPoint, GeofenceStatus, SearchStartRequest, SearchStatus, SearchWaypoint
 import state
 from telemetry import push_event
@@ -386,6 +387,135 @@ class SearchController:
             0.0,
             0.0,  # yaw, yaw_rate
         )
+
+    def begin_approach_descent(self) -> None:
+        """
+        Automatic, closed-loop descent for the DECODE phase.
+
+        Deliberately does NOT descend to any pre-decided fixed altitude.
+        The required altitude depends on the real camera lens/QR-size
+        combination, which varies enough (a 6mm lens needs ~9m for
+        4px/module, a 16mm lens could manage from ~25m) that hardcoding
+        a single number would just be a different guess wearing a config
+        variable's clothes. Instead: hold current horizontal position,
+        step down by APPROACH_DESCENT_STEP_M, hold and check live QR
+        decode consensus (from qr_pipeline_runner, reading whichever
+        camera the FSM has switched to on entering APPROACH — see
+        fsm.py::_switch_camera) for APPROACH_STEP_HOLD_S, and stop the
+        instant decode succeeds. Only descends further if it doesn't.
+        Hard-stops at APPROACH_MIN_ALTITUDE_M regardless of decode
+        status — that's a safety floor, not a target.
+
+        Runs in its own thread so the FSM's polling loop (fsm.py) can
+        watch get_status() without blocking on this.
+        """
+        if self._bus is None:
+            raise RuntimeError("MavlinkBus not attached to SearchController")
+
+        self._stop_event.clear()
+        with self._lock:
+            self._status.state = "approaching"
+            self._status.reason = "Beginning automatic closed-loop descent"
+
+        self._worker_thread = threading.Thread(
+            target=self._approach_descent_loop, name="approach-descent", daemon=True
+        )
+        self._worker_thread.start()
+
+    def _approach_descent_loop(self) -> None:
+        # Imported here, not at module top, to avoid a circular import
+        # (qr_pipeline.py takes a SearchController reference via
+        # set_search_controller() rather than importing this module).
+        from qr_pipeline import qr_pipeline_runner
+
+        fence = state.get()
+        if fence.origin_lat is None or fence.origin_lon is None:
+            with self._lock:
+                self._status.state = "error"
+                self._status.reason = "Fence state missing EKF origin — cannot compute local NED frame for descent"
+            return
+
+        self._set_guided_mode()
+
+        # Subscribe BEFORE we need it, same discipline as the fence
+        # protocol fix — no response, however fast, gets missed.
+        pos_queue = self._bus.subscribe(["GLOBAL_POSITION_INT"])
+        try:
+            pos_msg = None
+            deadline = time.time() + 5.0
+            while pos_msg is None and time.time() < deadline and not self._stop_event.is_set():
+                try:
+                    pos_msg = pos_queue.get(timeout=max(0.1, deadline - time.time()))
+                except queue.Empty:
+                    continue
+            if pos_msg is None:
+                with self._lock:
+                    self._status.state = "error"
+                    self._status.reason = "No position telemetry available to begin approach descent"
+                return
+
+            # Hold this horizontal position for the whole descent — we
+            # don't navigate anywhere new here, SEARCH/on_detection
+            # already got the vehicle over the target. We only change Z.
+            current_lat = pos_msg.lat / 1e7
+            current_lon = pos_msg.lon / 1e7
+            current_alt_rel = pos_msg.relative_alt / 1000.0
+            hold_point = latlon_to_enu(current_lat, current_lon, fence.origin_lat, fence.origin_lon)
+            north, east = hold_point.y, hold_point.x
+
+            target_alt = current_alt_rel
+            step = config.APPROACH_DESCENT_STEP_M
+            min_alt = config.APPROACH_MIN_ALTITUDE_M
+            hold_s = config.APPROACH_STEP_HOLD_S
+            overall_deadline = time.time() + config.APPROACH_MAX_DURATION_S
+
+            log.info(
+                "Approach descent starting: current_alt=%.1fm, step=%.1fm, "
+                "min_alt=%.1fm, hold=%.1fs/step", current_alt_rel, step, min_alt, hold_s
+            )
+
+            while not self._stop_event.is_set() and time.time() < overall_deadline:
+                down = -abs(target_alt)  # NED: down positive downward
+                with self._lock:
+                    self._status.state = "approaching"
+                    self._status.altitude_m = target_alt
+                    self._status.reason = f"Holding at {target_alt:.1f}m, checking decode"
+
+                step_deadline = time.time() + hold_s
+                while time.time() < step_deadline and not self._stop_event.is_set():
+                    self._send_position_target_ned(north, east, down)
+
+                    qr_status = qr_pipeline_runner.consensus.get_status()
+                    if qr_status.confirmed:
+                        with self._lock:
+                            self._status.state = "decoded"
+                            self._status.altitude_m = target_alt
+                            self._status.reason = f"Decode succeeded at {target_alt:.1f}m"
+                        log.info(
+                            "QR decode succeeded at %.1fm — descent stopped here, "
+                            "not at any pre-decided altitude.", target_alt
+                        )
+                        push_event("approach_decoded", {"altitude_m": target_alt, "payload": qr_status.payload})
+                        return
+
+                    time.sleep(0.5)  # 2Hz position-target stream rate
+
+                if target_alt <= min_alt:
+                    log.warning(
+                        "Reached safety floor %.1fm without a confirmed decode.", min_alt
+                    )
+                    with self._lock:
+                        self._status.state = "error"
+                        self._status.reason = f"Reached safety floor {min_alt:.1f}m without decode"
+                    return
+
+                target_alt = max(min_alt, target_alt - step)
+
+            with self._lock:
+                self._status.state = "error"
+                self._status.reason = "Approach descent timed out"
+        finally:
+            self._bus.unsubscribe(pos_queue)
 
     def _set_guided_mode(self) -> None:
         """Set Pixhawk mode to GUIDED via MAV_CMD_DO_SET_MODE."""
