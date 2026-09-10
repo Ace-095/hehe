@@ -213,6 +213,18 @@
     </div>
 
     <div class="card">
+      <h2>System Info <span class="badge idle" id="sysBadge">—</span></h2>
+      <div class="stat-row"><span class="k">CPU</span><span class="v" id="sysCpu">—</span></div>
+      <div class="stat-row"><span class="k">RAM</span><span class="v" id="sysRam">—</span></div>
+      <div class="stat-row"><span class="k">Disk</span><span class="v" id="sysDisk">—</span></div>
+      <div class="stat-row"><span class="k">CPU temp</span><span class="v" id="sysTemp">—</span></div>
+      <div class="stat-row"><span class="k">CPU freq</span><span class="v" id="sysFreq">—</span></div>
+      <div class="stat-row"><span class="k">uptime</span><span class="v" id="sysUptime">—</span></div>
+      <div class="stat-row"><span class="k">AI accelerator</span><span class="v" id="sysAi">—</span></div>
+      <div class="stat-row"><span class="k">Internet</span><span class="v" id="sysInternet">—</span></div>
+    </div>
+
+    <div class="card">
       <h2>Camera Pipeline <span class="badge idle" id="camBadge">mode: dual</span></h2>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
         <button id="btnCamModeCam1">Cam 1</button>
@@ -420,6 +432,27 @@ telem.on('gps', (gps) => {
 });
 telem.on('battery', (bat) => {
   $('telemBatV').textContent = bat.voltage_battery != null ? bat.voltage_battery.toFixed(2) + 'V' : '—';
+});
+
+telem.on('system', (sys) => {
+  $('sysBadge').textContent = 'live';
+  $('sysBadge').className = 'badge drawing';
+  $('sysCpu').textContent = sys.cpu_percent != null ? sys.cpu_percent.toFixed(0) + '%' : '—';
+  $('sysRam').textContent = sys.ram_percent != null
+    ? `${sys.ram_percent.toFixed(0)}% (${(sys.ram_used_mb/1024).toFixed(1)}/${(sys.ram_total_mb/1024).toFixed(1)} GB)`
+    : '—';
+  $('sysDisk').textContent = sys.disk_percent != null ? sys.disk_percent.toFixed(0) + '%' : '—';
+  $('sysTemp').textContent = sys.cpu_temp_c != null ? sys.cpu_temp_c.toFixed(1) + '°C' : 'n/a';
+  $('sysFreq').textContent = sys.cpu_freq_mhz != null ? (sys.cpu_freq_mhz/1000).toFixed(2) + ' GHz' : '—';
+  if (sys.uptime_s != null) {
+    const h = Math.floor(sys.uptime_s / 3600);
+    const m = Math.floor((sys.uptime_s % 3600) / 60);
+    $('sysUptime').textContent = `${h}h ${m}m`;
+  }
+  $('sysAi').textContent = sys.ai_accelerator_available ? 'online' : 'unavailable';
+  const internetEl = $('sysInternet');
+  internetEl.textContent = sys.internet_status === 'up' ? 'up' : 'down';
+  internetEl.style.color = sys.internet_status === 'up' ? 'var(--green)' : 'var(--text-dim)';
 });
 
 backendInput.addEventListener('change', () => {

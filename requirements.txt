@@ -16,6 +16,7 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 pymavlink>=2.4.40
 pydantic>=2.6
+psutil>=5.9               # Pi CPU/RAM/disk/temp monitoring — system_monitor.py
 
 # --- Phase 4: offline tile pre-caching tool ---
 requests>=2.31
