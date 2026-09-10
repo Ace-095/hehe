@@ -205,3 +205,72 @@ Manual checks:
 The `CameraSource` abstraction in `backend/camera_source.py` is the single
 point where these differences are isolated. All downstream pipeline code
 (`camera_manager.py`, `qr_pipeline.py`) is identical in both environments.
+
+---
+
+## Mission Planner telemetry link — resolved
+
+Decision: a dedicated telemetry radio pair connects directly to the
+Pixhawk 6C's **TELEM port**, completely independent of the Pi's USB
+connection. This is the simpler of the two options that were on the
+table (no `mavlink-router` or forwarding software needed on the Pi) —
+the Pixhawk natively serves MAVLink on multiple ports simultaneously, no
+extra configuration required for this to work alongside the Pi's own
+USB link.
+
+Bench-test checklist:
+- [ ] Telemetry radio pair bound/paired (matching network ID on both ends)
+- [ ] Mission Planner connects via the ground-side radio's COM port,
+      independent of anything the Pi is doing
+- [ ] Confirm both links show live heartbeat simultaneously — Mission
+      Planner over the radio, this project's backend over USB
+
+---
+
+## LTE dongle / internet status
+
+Per the original 3-way comms architecture (telemetry radio / Wi-Fi
+router / LTE dongle), the dongle leg is informational only —
+`backend/network_monitor.py` broadcasts internet up/down status to the
+UI, but **nothing safety-critical ever reads this value**. MAVLink stays
+on USB, the browser UI stays on the local LAN. This isn't a suggestion —
+it's the same core invariant this whole project has held since the
+geofence work: flight-critical functions must never depend on internet
+availability.
+
+Setup is OS-level network configuration, not application code:
+
+```bash
+# Most USB LTE dongles are recognized automatically by NetworkManager
+# once plugged in. Confirm it enumerates:
+nmcli device status
+
+# If it shows as a modem, create a connection profile:
+nmcli connection add type gsm ifname '*' con-name lte-dongle apn <your-carrier-APN>
+
+# Bring it up:
+nmcli connection up lte-dongle
+```
+**NEED TEAM INPUT:** the exact APN string depends on your SIM/carrier —
+confirm with whoever's providing the SIM before the event, not something
+to guess at.
+
+Once connected, `network_monitor.check_internet_status()` should report
+`up` in the UI's System Info panel within a few seconds (it polls every
+~5s). If it stays `down` with the dongle connected, check `nmcli device
+status` first — a common failure mode is the dongle registering as a
+modem but the GSM connection profile not actually activating.
+
+---
+
+## ⚠️ Note on this document's history
+
+An earlier, more thoroughly researched version of this file (verified
+AI HAT+ vs. M.2 "AI Kit" install steps — they have different setup
+paths, `hailo-all` package details, active cooler guidance, Pi 5's
+smaller CSI connector callout) appears to have been overwritten by a
+later, more generic pass through this repo. If you're missing those
+specifics, it's worth regenerating that section rather than assuming
+this current version is complete — the "NEED TEAM INPUT" placeholders
+for firmware version and camera model above were previously filled in
+with confirmed, sourced information.

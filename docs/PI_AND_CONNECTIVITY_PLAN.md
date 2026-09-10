@@ -125,15 +125,35 @@ live sequence.
 | Pi → Browser: live telemetry | WebSocket, tiered rate (2-5Hz position, 1Hz stats, event-driven) | ✅ VERIFIED — rate-limiting bug fixed |
 | Pi → Browser: camera feeds | WebRTC over LAN (aiortc), signaled over WS | ⚠️ PARTIAL — endpoints exist (`/ws/webrtc/{camera_id}`), not yet load-tested with real video |
 | Pi ↔ Pixhawk | MAVLink over USB | ✅ VERIFIED against mock; 🔬 NEED TEST against real hardware |
-| Mission Planner ↔ Pixhawk | **Open question, not yet resolved** | See below |
+| Mission Planner ↔ Pixhawk | **RESOLVED**: separate telemetry radio pair, plugged directly into the Pixhawk 6C's TELEM port — independent of the Pi's USB link entirely. No MAVLink forwarder needed. | ✅ Decision made |
+| Pi → Browser: Pi system health (CPU/RAM/disk/temp) | WebSocket, `system` channel, ~0.2Hz | ✅ VERIFIED — real values confirmed (CPU temp reads `null` off-Pi where no thermal zone exists, expected) |
+| Pi → Browser: internet status (LTE dongle) | WebSocket, same `system` channel | ✅ VERIFIED — purely informational, never gates any FSM state |
 | Browser → Pi: offline map tiles | HTTP, MBTiles-backed | 🚧 NOT STARTED (Phase 4/M3 in the main plan) |
 
-**Still-open item, carried forward from earlier in this project:**
-whether Mission Planner gets its own physical link (a telemetry radio
-pair) or shares the Pi's USB connection via a MAVLink forwarder. This
-was flagged in `BILL_OF_MATERIALS.md` as a real gap needing a team
-decision — it hasn't been resolved, and it affects whether you need to
-buy a telemetry radio pair before Phase F.
+**Mission Planner decision, resolved:** the telemetry radio connects
+directly to the Pixhawk 6C's own TELEM port, completely independent of
+the Pi's USB connection. This is the simpler of the two options — no
+`mavlink-router` or forwarding software needed on the Pi at all. Update
+your BOM to include a telemetry radio pair if you haven't already
+sourced one.
+
+---
+
+## LTE dongle / internet status
+
+Per the original 3-way comms architecture (telemetry / router / dongle),
+the dongle leg is now implemented — but stays strictly non-safety-critical,
+matching the project's core invariant (MAVLink over USB, browser UI over
+local LAN, neither depends on internet availability).
+
+- `backend/network_monitor.py::check_internet_status()` — a lightweight
+  TCP connection attempt to a well-known host, broadcast over the same
+  `system` WebSocket channel as Pi health stats. Drives the UI's
+  "Internet" indicator only — nothing reads this value for any flight or
+  mission decision.
+- **Dongle network setup itself is OS-level, not app code** — see
+  `docs/HARDWARE_SETUP.md`'s new LTE Dongle section for the actual
+  NetworkManager configuration steps.
 
 ---
 
