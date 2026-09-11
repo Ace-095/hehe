@@ -90,6 +90,18 @@ class Config:
     # actual competition format once the exact spec is known.
     SYNTHETIC_QR_PAYLOAD: str = os.environ.get("SYNTHETIC_QR_PAYLOAD", "42")
 
+    # --- Mission Planner result transmission ---
+    # STATUSTEXT has no ACK in the MAVLink spec — a single-shot send has
+    # no way to know if Mission Planner actually received it, and if the
+    # telemetry radio link happens to be down at that exact moment, the
+    # message is gone with no way to recover it (unlike the browser UI
+    # path, which replays the last known result to any newly-connecting
+    # WebSocket client). Mitigated by resending periodically for a
+    # bounded window, so a brief radio dropout has a real chance of
+    # landing one of the retries.
+    STATUSTEXT_RESEND_INTERVAL_S: float = float(os.environ.get("STATUSTEXT_RESEND_INTERVAL_S", "2.0"))
+    STATUSTEXT_RESEND_WINDOW_S: float = float(os.environ.get("STATUSTEXT_RESEND_WINDOW_S", "15.0"))
+
     # --- Search Algorithm (Phase 6) ---
     # SEARCH_ALTITUDE_M — the planned search-sweep altitude is ~14-15m per
     # the project's actual hardware discussion (T-Motor Air 2216/920KV

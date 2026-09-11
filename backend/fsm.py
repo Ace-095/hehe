@@ -38,6 +38,7 @@ class MissionFSM:
         self._last_battery_pct = 100.0
         self._last_alt_rel = 0.0
         self._motors_armed = False
+        self._statustext_last_send_time = 0.0
 
         self._msg_queue = None
 
@@ -316,19 +317,34 @@ class MissionFSM:
                         self._transition_to("FAILSAFE", "Decode timeout exceeded")
 
                 elif curr_state == "CONFIRMED":
+                    self._statustext_last_send_time = 0.0  # fresh window for the upcoming TRANSMIT_RESULT entry
                     self._transition_to("TRANSMIT_RESULT", "Payload confirmed")
 
                 elif curr_state == "TRANSMIT_RESULT":
-                    push_event("mission_result", {"payload": self._status.payload, "timestamp": time.time()})
-                    try:
-                        mf.send_statustext(self._bus, f"QR:{self._status.payload}", severity=6)
-                        log.info("Sent result to Mission Planner via STATUSTEXT: QR:%s", self._status.payload)
-                    except Exception as e:
-                        # Don't block the mission on this — the UI already
-                        # has the result via push_event above. But this
-                        # must not fail silently either.
-                        log.error("Failed to send result to Mission Planner: %s", e)
-                    self._transition_to("RTL", "Result transmitted, returning to launch")
+                    resend_due = (time.time() - self._statustext_last_send_time) >= config.STATUSTEXT_RESEND_INTERVAL_S
+                    if resend_due and elapsed < config.STATUSTEXT_RESEND_WINDOW_S:
+                        if self._statustext_last_send_time == 0.0:
+                            # First send since entering this state — UI
+                            # gets this once; it doesn't need resending
+                            # the way STATUSTEXT does, since a
+                            # reconnecting browser is replayed the latest
+                            # cached message per channel automatically.
+                            push_event("mission_result", {"payload": self._status.payload, "timestamp": time.time()})
+                        try:
+                            mf.send_statustext(self._bus, f"QR:{self._status.payload}", severity=6)
+                            self._statustext_last_send_time = time.time()
+                            log.info(
+                                "Sent result to Mission Planner via STATUSTEXT (elapsed=%.1fs into %.0fs window): QR:%s",
+                                elapsed, config.STATUSTEXT_RESEND_WINDOW_S, self._status.payload,
+                            )
+                        except Exception as e:
+                            # Don't block the mission on this — the UI
+                            # already has the result via push_event
+                            # above. But this must not fail silently.
+                            log.error("Failed to send result to Mission Planner: %s", e)
+
+                    if elapsed >= config.STATUSTEXT_RESEND_WINDOW_S:
+                        self._transition_to("RTL", "Result transmitted, returning to launch")
 
                 elif curr_state == "FAILSAFE":
                     search_controller.stop_search("Failsafe triggered")
